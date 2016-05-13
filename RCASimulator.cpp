@@ -1,3 +1,21 @@
+//Andrew Noske's custom Qt dialog box header (customdialog.cpp will also be used)
+#include "customdialog.h"
+#include <QTextStream>
+#include <QDebug>
+#include <QPlainTextEdit>
+#include <QFile>
+#include <QScrollBar>
+#include <QColor>
+#include <QPainter>
+#include <QImage>
+#include <QDialog>
+#include <QLabel>
+#include <QRect>
+#include <QtGui>
+#include <QFile>
+#include <QMainWindow>
+
+
 #include <algorithm>
 #include <cstdlib>
 #include <fstream>
@@ -9,7 +27,7 @@
 #include <time.h>
 #include <utility>
 #include <cmath>
-#include <array>
+#include <sstream>
 #include <random>
 #include <gmpxx.h>
 
@@ -17,6 +35,7 @@
 #define cimg_display 1
 #define cimg_use_png
 #include "CImg.h"
+
 
 //for quick conversions from character to integer or vice versa
 #define to_digit(c) (c - '0')
@@ -56,6 +75,62 @@ int generate_index(int Size);
 
 /* __________ Primary Data Structures __________ */
 
+class RCA;
+
+//subclass for handling the primary log window and file I/O
+class LogWindow : public QPlainTextEdit
+{
+	public:
+		LogWindow(RCA *sim){
+			//ensure the user cannot edit the log window
+			setReadOnly(true);
+
+			//keep a reference to the simulation this log window belongs to
+			parent = sim;
+		
+			//set size information
+			this->resize(800, 500);
+			this->setMinimumSize(600, 300);
+		}
+		
+		//add a message to the primary log window
+		void addMessage(const QString& text){
+			this->appendPlainText(text); // Adds the message to the widget
+			this->verticalScrollBar()->setValue(this->verticalScrollBar()->maximum()); // Scrolls to the bottom
+		}
+		
+
+		RCA *parent;
+		QFile m_logFile;
+};
+
+
+//subclass for drawing the image of the completed RCA
+class SimDrawing : public QLabel
+{
+	public:
+		SimDrawing(RCA *sim){
+			//keep a reference to the simulation this log window belongs to
+			parent = sim;
+		
+			image = NULL;
+
+			//set size information
+			this->resize(800, 500);
+			this->setMinimumSize(600, 300);
+		}
+		
+		void draw_simulation();
+		
+		void paintEvent(QPaintEvent *e){
+			draw_simulation();
+		}
+
+		RCA *parent;
+		QImage *image;
+};
+
+
 //holds data/results for measurements of disorder within a given RCA
 typedef struct{
 	int window_size; 						//window size (time steps to group together) for input entropy calculations 
@@ -67,9 +142,6 @@ typedef struct{
 	vector<vector<int>> lookup_frequency; 	//[window][table index], contains total number of neighborhood lookups in that window
 	vector<double> config_entropy; 			//[time step] the entropy of each state configuration ensemble at each time step 
 	vector<double> input_entropy; 			//the input entropy based on the frequency of neighborhood occurrences per time step 	
-	
-
-
 } Calculations;
 
 
@@ -77,20 +149,25 @@ typedef struct{
 class State{
 	public:
 		int number;
+		QColor *color;
 		string color_name;
 		unsigned char rgb[3];
 		CImg<unsigned char> image;
 
 		State(int state_num);
+		~State(){
+			delete color;
+		}
 };
 
 
 //primary class for running a particular CA simulation
 class RCA{
 	public:
+		unsigned int seed;
+		string simulation_ID;
 		string rule_number; 			//rule number that corresponds to transition function string (string for simple conversions)
 		int state_count;
-		int simulation_ID;
 		int space_width;
 		int time_steps;
 		int neighborhood_size;
@@ -102,8 +179,10 @@ class RCA{
 		vector <pair<string, unsigned char [3]>> color_codes;
 		Calculations results; 			//calculated measures of order/disorder for this RCA
 		CImg<unsigned char> grid;		//the image that represents the completed simulation
-		
+		LogWindow *log_window;
+		SimDrawing *sim_image;	
 
+		RCA();
 		RCA(int ID, int run_steps, int num_states, int width, int radius);
 		void create_rule_table(const string &given_rule_number, bool random);
 		void setup_initial_config(const string &given_initial_config_number, bool use_directly, bool random);
@@ -113,12 +192,17 @@ class RCA{
 		double calc_norm_input_entropy(const vector<int> &lookup_freq); //calculates normalized input/lookup entropy of configuration at time step t
 		double calc_transition_rule_entropy(); 							//calculates the entropy of the transition rule set
 		double calc_config_entropy(const vector<int> &state_freq); 		//calculates the entropy of the state configuration at time step t
+		void new_message(const string &text); 							//message handler - sends a message to the LogWindow visible to the user
 		void drawGrid();
+		void save_data();
+		
 };
+
 
 
 //start the simulator
 int main(int argc, char **argv){
+	QApplication app(argc, argv);
 	RCA *sim;	
 	unsigned int seed;
 
@@ -141,115 +225,66 @@ int main(int argc, char **argv){
 
 	cimg_help("\nUse the given flags to specifically set particular parameters");
 
-	//directly prompt user for information if no arguments are given
-	if(argc == 1){
-	}
+	
+	//set up the lookup table containing viable state colors and their rgb values
+	init_color_table();
+
+	sim = new RCA();
+
 
 	//if the CImg help flagi (-h) is the only argument given, print the help information, but don't run the simulation
 	if(argc == 2){
 		if(strcmp(argv[1], "-h") == 0) exit(0);
 	}
 
-	//seed the random number generator and save the value used (given_seed = 0 indicates the user did not specify a particular seed)
-	if(given_seed == 0) seed = randomize();
-	else{
-		seed = given_seed;
-		globalRNG.seed(seed);
-	}
-	printf("Seed used: %u\n", seed);
-
-	//ensure the given number of time steps to run the simulation can be evenly divided into (1 / window_percent) different windows 
-	int num_windows = (int)(1 / window_percent);
-	if(run_steps % num_windows != 0) run_steps += (num_windows - (run_steps % num_windows)); 
-
-	//printf("RULE NUMBER AS STRING: %s\n", rule_num_string.c_str());
-	//unsigned long long int rule_num = strtoull(rule_num_string.c_str(), NULL, 10);
-	//printf("RULE NUMBER AS Ull: %llu\n", rule_num);
-	
-	//set up the lookup table containing viable state colors and their rgb values
-	init_color_table();
-
-	//determine the total number of possible neighborhood configurations
-	int neighborhood_size = (2 * radius) + 1;
-	if(neighborhood_size >= width) { fprintf(stderr, "The neighborhood diameter cannot be greater than the width of the space\n"); exit(1); }
-	
-	unsigned long long int rule_string_length = (unsigned long long int) pow(num_states, neighborhood_size);
-	//printf("num_states: %d, neighborhood_size: %d\n", num_states, neighborhood_size);
-	//printf("Rule string length: %llu\n", rule_string_length);
-	//printf("Rule num: %llu\n", rule_num);
-	
-	
-	//string rule_string = "";
-	/*
-	convert_base(rule_string, rule_num, rule_string_length, num_states);
-	printf("After CB -> Rule_Num: %llu\n", rule_num);
-	printf("After CB -> Rule_String: %s\n", rule_string.c_str());
-	reverse(rule_string.begin(), rule_string.end());
-	printf("Reversed rule: %s\n", rule_string.c_str());
-
-	printf("\nRule table:\n");
-	for(int r = 0; r < rule_string_length; r++){
-		string n;
-		unsigned long long int index = r;
-		convert_base(n, index, neighborhood_size, num_states);
-		//printf("	Rule[%d]: %s -> %c\n", r, n.c_str(), rule_string[r]);
-	}
-	*/
-	
-	//convert_base(rule_string, rule_num, rule_string_length, num_states);
-	//printf("Rule num: %llu\n", rule_num);
-
-	//create a new simulation instance and initialize basic information	
-	sim = new RCA(1, run_steps, num_states, width, radius);
-
-	//create the rule table for this simulation (randomly or based on the given_rule_number)
-	sim->create_rule_table(rule_num, random_rule);
-
-	printf("sim->rule_num: %s\n", sim->rule_number.c_str());
-	printf("sim->rule_string: %s\n", sim->rule_string.c_str());
-
-	//set up the initial configuration for t = 0 (randomly or specified by the user)
-	sim->setup_initial_config(initial_config, use_directly, random_initial);
-	
-
+	sim->new_message("\n\nCalculations:");
+	char buffer[100];
 	sim->results.transition_rule_entropy = sim->calc_transition_rule_entropy();
-	printf("Rule string entropy: %.10lf\n", sim->results.transition_rule_entropy);
-	printf("Langton's lambda: %.10lf\n", sim->results.lambda);
+	sprintf(buffer, "\nRule string entropy: %.10lf", sim->results.transition_rule_entropy);
+	sim->log_window->addMessage(QString(buffer));
+	sim->new_message(" ");
+
+	sprintf(buffer, "\nLangton's lambda: %.10lf", sim->results.lambda);
+	sim->log_window->addMessage(QString(buffer));
+	sim->new_message(" ");
 
 	int window_index = -1;
-	//determine the configurations for the remaining time steps
+	//update the configurations across all time steps
 	for(int i = 0; i < sim->time_steps; i++){
 		if(i % sim->results.window_size == 0) window_index++;
 		sim->update_config(i, window_index);
 	}
 
+	//log results of total state frequency
+	sim->new_message("\nFrequency of each state across all time steps");
+	for(int i = 0; i < sim->results.total_state_frequency.size(); i++){
+		sprintf(buffer, "  State [%d] Total Occurrences: %d", i, sim->results.total_state_frequency[i]);
+		sim->log_window->addMessage(QString(buffer));
+	}
+
+	//log results of input entropy calculations
+	sprintf(buffer, "\nInput Entropy across %d windows of %d time steps each\n", sim->results.window_count, sim->results.window_size);
+	sim->log_window->addMessage(QString(buffer));
 	for(int w = 0; w < sim->results.window_count; w++){
 		sim->results.input_entropy[w] = sim->calc_norm_input_entropy(sim->results.lookup_frequency[w]);
-		//printf("Window[%d]: input_entropy = %0.10lf\n", w, sim->results.input_entropy[w]);
+		sprintf(buffer, "  Window [%d]: %0.10lf", w, sim->results.input_entropy[w]);
+		sim->log_window->addMessage(QString(buffer));
 	}
 
-	for(int i = 0; i < sim->results.total_state_frequency.size(); i++){
-		printf("State[%d] initial occurrences: %d\n", i, sim->results.total_state_frequency[i]);
-	}
-
+	//log configuration entropy at each time step
+	sprintf(buffer, "\nEntropy of state configurations at each time step\n");
+	sim->log_window->addMessage(QString(buffer));
 	for(int i = 0; i < sim->results.config_entropy.size(); i++){
-		printf("T[%d] config entropy: %0.10lf\n", i, sim->results.config_entropy[i]);
+		sprintf(buffer, "  Time [%d] Configuration Entropy: %0.10lf", i, sim->results.config_entropy[i]);
+		sim->log_window->addMessage(QString(buffer));
 	}
 
+	sim->sim_image->draw_simulation();
 
-	/*
-	printf("Input Entropy\n");
-	for(int i = 0; i < sim->time_steps; i++){
-		//if(i % (sim->time_steps / 10) == 0) printf("  Time[%d]: %.30lf\n", i, sim->results.input_entropy[i]);
-		printf("  Time[%d]: %.30lf\n", i, sim->results.input_entropy[i]);
-	}
-	*/
+	sim->save_data();
 
-	//draw the resulting grid of cell states after the simulation has completed
-	sim->grid.normalize(0, 255);
-	//sim->grid.save("grid_test.png");
-	sim->grid.save("grid_test2.png");
-	
+	app.exec();
+
 	return 0;
 }
 
@@ -262,29 +297,109 @@ int RCA::index_wrapper(int index){
 }
 
 
-//constructor for an instance of an RCA simulation
-RCA::RCA(int ID, int run_steps, int num_states, int width, int radius){
+RCA::RCA(){
 	int i;
 	int grid_width;
 	int grid_height;
 	State *cur_state;
+	QWidget input_widget;
 
-	//initialize known RCA simulation information
+	//create new LogWindow and SimDrawing instances
+	log_window = new LogWindow(this);
+	sim_image = new SimDrawing(this);
+
+	//ensure the given number of time steps to run the simulation can be evenly divided into (1 / window_percent) different windows 
+	int num_windows = (int)(1 / window_percent);
+	//if(run_steps % num_windows != 0) run_steps += (num_windows - (run_steps % num_windows)); 
+
+	simulation_ID = "Test";
+	state_count = 1;
+	space_width = 50;
+	time_steps = 100;
+	neighborhood_radius = 1;
+	string initial_config = "";
+	string given_rule_number = "";
+	bool use_directly = true;
+	string given_seed = "";
+	bool random_rule = true;
+	bool random_seed = true;
+	bool random_init_config = true;
+
+	CustomDialog d("Reversible Cellular Automaton Parameters", &input_widget);
+	d.addLabel    ("Please fill in the required information below...");
+	d.addLineEdit ("Simulation ID: ", &simulation_ID, "Used to identify the partiular simulation");
+	d.addSpinBox  ("Number of States: ", 2, 9, &state_count, 1, "The number of different states within the system");
+	d.addSpinBox  ("Width of Space: ", 10, 5000, &space_width, 10, "The width of the periodic configuration space");
+	d.addSpinBox  ("Time Steps: ", num_windows, num_windows * 50, &time_steps, num_windows, "The time steps to simulate");
+	d.addSpinBox  ("Neighborhood Radius: ", 1, 10, &neighborhood_radius, 1, "The radius of cells (not full size) to consider during state updating");
 	
-	simulation_ID = ID;
-	time_steps = run_steps;
-	state_count = num_states;
-	space_width = width;
-	neighborhood_radius = radius;
-	neighborhood_size = (2 * radius) + 1;
-	if(neighborhood_size >= width) { fprintf(stderr, "The neighborhood diameter cannot be greater than the width of the space\n"); exit(1); }
+	d.beginGroupBox("", false, "", false);
+	d.addCheckPrev("Use Random Rule ", &random_rule, CB_DISABLE, false, "Generate a random rule, rather than use a specific rule number");
+	d.addLineEdit ("Use Rule Number: ", &given_rule_number, "The rule number to expand and convert into a transition table");
+	d.endGroupBox();
+
+	d.beginGroupBox("", false, "If an initial configuration is specified, it must either be used directly or expanded from a decimal number", false);
+	d.addCheckPrev("Use Random Initial Configuration ", &random_init_config, CB_DISABLE, false, "Generate a random initial configuration, rather than use a specific one");
+	d.addLineEdit("Use Initial Configuration: ", &initial_config, "The initial configuration (either as a literal string or decimal value)");
+	d.addCheckBox("Use the Literal Initial Configuration Given ", &use_directly);
+	d.endGroupBox();
+
+	d.beginGroupBox("", false, "", false);
+	d.addCheckPrev("Use Random Seed ", &random_seed, CB_DISABLE, false, "Generate a random seed for the random number generator");
+	d.addLineEdit("Use Seed: ", &given_seed, "The seed to use for the random number generator");
+	d.endGroupBox();
+
+	d.exec();                    // Execution stops here until user closes dialog
+
+	if(d.wasCancelled()) {
+		//if the user cancels out of the input dialog window, exit the application
+		exit(1);
+	}
+
+	char buf[200];
+	new_message("Running Simulation: " + simulation_ID + "\n\n");
+	new_message("System Parameters:\n");
+
+	sprintf(buf, " Number of States: %d", state_count);
+	log_window->addMessage(QString(buf));
+	
+	sprintf(buf, " Number of Time Steps: %d", time_steps);
+	log_window->addMessage(QString(buf));
+
+	sprintf(buf, " Space Width (Periodic): %d", space_width);
+	log_window->addMessage(QString(buf));
+
+	sprintf(buf, " Neighborhood Radius: %d", neighborhood_radius);
+	log_window->addMessage(QString(buf));
+
+	log_window->show();
+
+	//set the seed value if given, or randomize if specified (or if the given seed is invalid)
+	if(random_seed) seed = randomize();
+	else{
+		istringstream reader(given_seed);
+		if(reader >> seed){
+			globalRNG.seed(seed);	
+		}
+		else {
+			fprintf(stderr, "The given seed was not a valid unsigned integer. A random seed is being generated.\n"); 
+			seed = randomize();
+		}
+	}
+
+	string seed_message = " Using Seed: " + to_string(seed);
+	log_window->addMessage(QString(seed_message.c_str()));
+
+	//calculate the neighborhood size
+	neighborhood_size = (2 * neighborhood_radius) + 1;
+	if(neighborhood_size >= space_width) { fprintf(stderr, "The neighborhood diameter cannot be greater than the width of the space\n"); exit(1); }
 	
 	//determine the total number of possible neighborhood configurations
-	possible_neighborhoods = (unsigned long long int) pow(num_states, neighborhood_size);
-	
+	possible_neighborhoods = (unsigned long long int) pow(state_count, neighborhood_size);
+
 	//initialize information for each of the cell state options
-	all_states.resize(num_states);
-	for(i = 0; i < num_states; i++){
+	all_states.resize(state_count);
+	for(i = 0; i < state_count; i++){
 		all_states[i] = new State(i);
 	}
 	
@@ -295,7 +410,22 @@ RCA::RCA(int ID, int run_steps, int num_states, int width, int radius){
 
 	//resize the space to match the number of time steps and the specified space width at each step
 	space.resize(time_steps);
-	for(i = 0; i < time_steps; i++) space[i].resize(width);
+	for(i = 0; i < time_steps; i++) space[i].resize(space_width);
+
+	//initialize the rule string either randomly or from the provided rule number
+	create_rule_table(given_rule_number, random_rule);
+
+	string teststr = " Rule Number: " + rule_number;
+	log_window->addMessage(QString(teststr.c_str()));
+
+	teststr = " Rule String: " + rule_string;
+	log_window->addMessage(QString(teststr.c_str()));
+
+	//set up the initial configuration for t = 0 (randomly or specified by the user)
+	setup_initial_config(initial_config, use_directly, random_init_config);
+
+	teststr = " Initial Configuration: " + space[0];
+	log_window->addMessage(QString(teststr.c_str()));
 
 	//initialize information/containers within the Calculations struct
 	results.window_size = (time_steps * window_percent);
@@ -410,16 +540,8 @@ void RCA::setup_initial_config(const string &given_initial_config, bool use_dire
 
 			cur_state = all_states[to_digit(space[0][i])];
 			if(cur_state == NULL) printf("Could not grab a state from all_states");
-
-			//draw the current cell in the corresponding spot of the grid image
-			//grid.draw_image(i * cell_size, 0, cur_state->image, 1);
 		}
 	}
-	
-	//add these initial state occurrences to the total state frequency vector
-	//for(char state: space[0]) results.state_frequency[to_digit(state)] += 1;
-
-	printf("Finished setting up initial configuration\n");
 }
 
 
@@ -487,13 +609,9 @@ double RCA::calc_norm_input_entropy(const vector<int> &lookup_frequency){
 	for(int i = 0; i < lookup_frequency.size(); i++){
 		if(lookup_frequency[i] > 0){
 			entropy += ((((double)lookup_frequency[i] / num_cells) * log((double)lookup_frequency[i] / num_cells)) / log(possible_neighborhoods));
-			//entropy += ((((double)lookup_frequency[i]) * log((double)lookup_frequency[i])));
 		}
 	}
-	//entropy /= num_cells;
-	//entropy = (log(num_cells) - entropy); 
-
-	//printf("Entropy %lf\n", entropy * (-1));
+	
 	return ((entropy == 0) ? 0 : entropy * -1);
 }
 
@@ -539,6 +657,112 @@ double RCA::calc_config_entropy(const vector<int> &state_frequency){
 	return entropy;
 }
 
+
+void RCA::new_message(const string &text){
+	//simply create a QString from the given text and send it to the LogWindow
+	QString message(text.c_str());
+	log_window->addMessage(message);
+}
+
+
+//save the simulation image and save the calculated data into a .csv file
+void RCA::save_data(){
+	bool save;
+	char data_name[200];
+	char image_name[200];
+
+	//format each filename
+	sprintf(image_name, "%s_%u.png", simulation_ID.c_str(), seed);
+	sprintf(data_name, "%s_%u.csv", simulation_ID.c_str(), seed);
+
+
+	//prompt the user and ask if they want to save the data/image for this simulation
+	save = MsgBoxYesNo(NULL, "Do you want to save the resulting image and calculated data for this simulation?");
+
+	if(save){
+		//prompt the user for the directory to save the data/image into	
+		QString dir = QFileDialog::getExistingDirectory(NULL, QString("Open Directory"), "/home", QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+
+		//save the data for this simulation into a .csv file
+		QString data_path = dir + QString("/") + QString(data_name);
+		QFile data(data_path);
+
+		if(data.open(QIODevice::WriteOnly)){
+			char buffer[100];
+			QTextStream stream(&data);
+			
+			//information about the system
+			stream << "RCA System Information" << endl;
+			stream << "ID:," << QString(simulation_ID.c_str()) << endl;
+			stream << "Seed:," << seed << endl;
+			stream << "Rule Number:," << QString(rule_number.c_str()) << endl;
+			stream << "Rule String:," << QString(rule_string.c_str()) << endl;
+			stream << "States:," << state_count << endl;
+			stream << "Neighborhood Radius:," << neighborhood_radius << endl;
+			stream << "Space Width:," << space_width << endl;
+			stream << "Time Steps:," << time_steps << endl;
+
+			stream << "\nCalculations:\n";
+			
+			//rule string entropy
+			sprintf(buffer, "Rule string entropy:, %.10lf\n", results.transition_rule_entropy);
+			stream << buffer;
+
+			stream << endl;
+
+			//Langton's lambda
+			sprintf(buffer, "Langton's lambda:, %.10lf\n", results.lambda);
+			stream << buffer;
+			
+			stream << endl;
+
+			//total state occurrences across all time steps
+			stream << "Frequency of each state across all time steps\n";
+			stream << "State #, Occurrences\n";
+			for(int i = 0; i < results.total_state_frequency.size(); i++){
+				sprintf(buffer, "%d, %d\n", i, results.total_state_frequency[i]);
+				stream << buffer;
+			}
+
+			stream << endl;
+
+			//log results of input entropy calculations
+			sprintf(buffer, "Input Entropy across %d windows of %d time steps each\n", results.window_count, results.window_size);
+			stream << buffer;
+
+			stream << "Window #, Input Entropy\n";
+			for(int w = 0; w < results.window_count; w++){
+				results.input_entropy[w] = calc_norm_input_entropy(results.lookup_frequency[w]);
+				sprintf(buffer, "%d, %0.10lf\n", w, results.input_entropy[w]);
+				stream << buffer;
+			}
+			
+			stream << endl;
+
+			//configuration entropy at each time step
+			stream << "Entropy of state configurations at each time step\n";
+			
+			stream << "Time, Configuration Entropy\n";
+			for(int i = 0; i < results.config_entropy.size(); i++){
+				sprintf(buffer, "%d, %0.10lf\n", i, results.config_entropy[i]);
+				stream << buffer;
+			}
+
+			new_message("Data file successfully saved");
+		}else{
+			new_message("Data file could not be saved");
+		}
+
+
+		//save the image of the simulation
+		QString image_path = dir + QString("/") + QString(image_name);
+		if(sim_image->image->save(image_path, "PNG")) new_message("\nImage file successfully saved");
+		else new_message("\nImage file could not be saved"); 
+	}
+}
+
+
+
 /* __________ State Class Member Functions __________ */
 
 //construct each of the "states" that will be used
@@ -555,12 +779,72 @@ State::State(int state_num){
 	printf(" 	State color name: %s\n", color_name.c_str());
 	printf(" 	RGB: (%d, %d, %d)\n", rgb[0], rgb[1], rgb[2]);
 
+	//create a QColor instance using those rgb values
+	color = new QColor((int)rgb[0], (int)rgb[1], (int)rgb[2]);
+
 	//create a CImg for this state that represents how a given cell will look in the RCA grid
 	image = CImg<unsigned char>(cell_size, cell_size, 1, 3);
 	//set each pixel of the square cell image to be the correct rgb value
 	cimg_forXYC(image, x, y, c){
 		image(x, y, c) = rgb[c];
 	}
+}
+
+
+//draw the image of the CA based on the board (returns success status to saving the resulting .png image)
+void SimDrawing::draw_simulation(){
+	//set up the grid dimensions that will represent the completed simulation image
+	int grid_width = cell_size * parent->space_width;
+	int grid_height = cell_size * parent->time_steps;
+	QColor *color;
+	State *state;
+	
+	//create a new QImage for the drawing (using pointer in SimImage)
+	image = new QImage(grid_width, grid_height, QImage::Format_ARGB32_Premultiplied);
+
+	QPainter painter;
+
+	//paint into the QImage from the class
+	painter.begin(image);
+	
+	//fill in the background
+	painter.setClipRect(QRect(0, 0, grid_width, grid_height));
+	painter.setPen(Qt::NoPen);
+	painter.fillRect(QRect(0, 0, grid_width, grid_height), Qt::black);
+
+	//iterate through each cell at each time step and draw the cell's image
+	for(unsigned int t = 0; t < parent->space.size(); t++){
+		for(unsigned int c = 0; c < parent->space[t].size(); c++){
+			state = parent->all_states[(to_digit(parent->space[t][c]))];
+			color = state->color;
+
+			painter.fillRect(QRect((c * cell_size), (t * cell_size), cell_size, cell_size), *color);
+		}
+	}
+
+	painter.end();
+
+
+
+
+
+	//load the QImage into this widget
+	//this->setPixmap(QPixmap::fromImage((*image)));
+	//this->show();
+
+	/*
+	char buffer[500];
+	sprintf(buffer, "%s_%u.png", this->parent->simulation_ID.c_str(), this->parent->seed);
+	if(image->save(QString(buffer), "PNG")){
+		this->parent->new_message("\nImage file successfully saved");
+		return true;
+	}
+ 	else return false;
+	*/
+
+	//save the image
+	//QString filename("QPaint_grid_test.png");
+	//return (*image).save(filename, "png", -1);
 }
 
 
@@ -587,8 +871,6 @@ char modulo_subtract(char first, char second, int state_count){
 
 //initialize the table of color values (RGB) for drawing the CA state images
 void init_color_table(){
-	int i;
-
 	//each entry corresponds to a single color
 	color_codes.resize(10);
 
@@ -673,15 +955,16 @@ void RCA::create_rule_table(const string &given_rule_number, bool random){
 
 		printf("AFTER: %s\n", rule_string.c_str());
 		
-		//reverse the rule table string so that indexing into it by neighborhood configurations will work properly
-		reverse(rule_string.begin(), rule_string.end());
-
-		printf("REVERSE: %s\n", rule_string.c_str());
-
 		//determine the rule number that corresponds to this transition table
 		mpz_set_str(value, rule_string.c_str(), state_count);
 		rule_number = mpz_get_str(NULL, 10, value);
 		printf(" 	Rule_number: %s\n", rule_number.c_str());
+	
+
+		//reverse the rule table string so that indexing into it by neighborhood configurations will work properly
+		reverse(rule_string.begin(), rule_string.end());
+
+		printf("REVERSE: %s\n", rule_string.c_str());
 	}
 	//if random is false, use the given_rule_number to construct the corresponding rule table string 
 	else{
@@ -702,6 +985,7 @@ void RCA::create_rule_table(const string &given_rule_number, bool random){
 			//reverse(rule_string.begin(), rule_string.end());
 		}
 		
+		reverse(rule_string.begin(), rule_string.end());
 		printf("RULE TABLE: %s\n", rule_string.c_str());
 	}
 }
